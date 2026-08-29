@@ -42,7 +42,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         println!(
-            "Battery: {:.2}% {}",
+            "Battery: {:.0}% {}",
             battery_info.percentage(),
             if battery_info.charging {
                 "(charging)"
