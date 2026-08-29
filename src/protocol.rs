@@ -68,18 +68,50 @@ impl std::fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
+#[derive(Debug, Clone, Copy)]
+struct CommandSpec {
+    command_class: u8,
+    command_id: u8,
+    data_size: u8,
+}
+
+const BATTERY_LEVEL: CommandSpec = CommandSpec {
+    command_class: 0x07,
+    command_id: 0x80,
+    data_size: 2,
+};
+
+const CHARGING_STATUS: CommandSpec = CommandSpec {
+    command_class: 0x07,
+    command_id: 0x84,
+    data_size: 2,
+};
+
+const FIRMWARE_INFO: CommandSpec = CommandSpec {
+    command_class: 0x00,
+    command_id: 0x81,
+    data_size: 2,
+};
+
+const GET_DPI: CommandSpec = CommandSpec {
+    command_class: 0x04,
+    command_id: 0x85,
+    data_size: 7,
+};
+
+const SET_DPI: CommandSpec = CommandSpec {
+    command_class: 0x04,
+    command_id: 0x05,
+    data_size: 7,
+};
+
 #[derive(Debug, Clone)]
 pub(crate) struct RazerReport {
     bytes: [u8; REPORT_SIZE],
 }
 
 impl RazerReport {
-    pub(crate) fn new(
-        transaction_id: u8,
-        command_class: u8,
-        command_id: u8,
-        data_size: u8,
-    ) -> Self {
+    fn new(transaction_id: u8, spec: CommandSpec) -> Self {
         let mut report = Self {
             bytes: [0; REPORT_SIZE],
         };
@@ -89,9 +121,9 @@ impl RazerReport {
         report.bytes[REMAINING_PACKETS_HIGH] = 0x00;
         report.bytes[REMAINING_PACKETS_LOW] = 0x00;
         report.bytes[PROTOCOL_TYPE] = 0x00;
-        report.bytes[DATA_SIZE] = data_size;
-        report.bytes[COMMAND_CLASS] = command_class;
-        report.bytes[COMMAND_ID] = command_id;
+        report.bytes[DATA_SIZE] = spec.data_size;
+        report.bytes[COMMAND_CLASS] = spec.command_class;
+        report.bytes[COMMAND_ID] = spec.command_id;
         report.bytes[RESERVED] = 0x00;
 
         report.update_crc();
@@ -106,28 +138,35 @@ impl RazerReport {
     }
 
     pub(crate) fn for_battery_level(transaction_id: u8) -> Self {
-        Self::new(
-            transaction_id,
-            0x07, // Battery/power command class
-            0x80, // Get battery level
-            0x02, // Response contains two argument bytes
-        )
+        Self::new(transaction_id, BATTERY_LEVEL)
     }
 
     pub(crate) fn for_charging(transaction_id: u8) -> Self {
-        Self::new(
-            transaction_id,
-            0x07, // Battery/power command class
-            0x84, // Get charging status
-            0x02, // Response contains two argument bytes
-        )
+        Self::new(transaction_id, CHARGING_STATUS)
     }
 
-    /*
     pub(crate) fn for_firmware(transaction_id: u8) -> Self {
-        Self::new(transaction_id, 0x00, 0x81, 0x02)
+        Self::new(transaction_id, FIRMWARE_INFO)
     }
-    */
+
+    pub(crate) fn for_get_dpi(transaction_id: u8) -> Self {
+        // arguments[0] remains 0x00 (NOSTORE).
+        Self::new(transaction_id, GET_DPI)
+    }
+
+    pub(crate) fn for_set_dpi(transaction_id: u8, x: u16, y: u16) -> Self {
+        let mut report = Self::new(transaction_id, SET_DPI);
+        let [x_high, x_low] = x.to_be_bytes();
+        let [y_high, y_low] = y.to_be_bytes();
+
+        report.bytes[ARGUMENTS_START..ARGUMENTS_START + 7].copy_from_slice(&[
+            0x01, // VARSTORE
+            x_high, x_low, y_high, y_low, 0x00, 0x00,
+        ]);
+
+        report.update_crc();
+        report
+    }
 
     fn calculate_crc(&self) -> u8 {
         calculate_crc_by_bytes(&self.bytes[2..88])
@@ -147,12 +186,10 @@ pub(crate) struct FeatureReportResponse {
 pub(crate) struct RazerReportParser;
 
 impl RazerReportParser {
-    pub(crate) fn parse(
+    fn parse(
         feature_report: &[u8],
         expected_transaction_id: u8,
-        expected_class: u8,
-        expected_id: u8,
-        expected_data_size: usize,
+        spec: CommandSpec,
     ) -> Result<&[u8], ProtocolError> {
         if feature_report.len() != FEATURE_REPORT_SIZE {
             return Err(ProtocolError::InvalidLength(feature_report.len()));
@@ -183,30 +220,25 @@ impl RazerReportParser {
             return Err(ProtocolError::UnexpectedTransactionId(report[1]));
         }
 
-        if report[6] != expected_class || report[7] != expected_id {
+        if report[6] != spec.command_class || report[7] != spec.command_id {
             return Err(ProtocolError::UnexpectedCommand {
                 class: report[6],
                 id: report[7],
             });
         }
 
-        if expected_data_size > ARGUMENTS_CAPACITY
-            || usize::from(report[DATA_SIZE]) != expected_data_size
-        {
-            return Err(ProtocolError::InvalidDataSize(report[DATA_SIZE]));
-        }
-        if usize::from(report[DATA_SIZE]) != expected_data_size {
+        if usize::from(spec.data_size) > ARGUMENTS_CAPACITY || report[DATA_SIZE] != spec.data_size {
             return Err(ProtocolError::InvalidDataSize(report[DATA_SIZE]));
         }
 
-        Ok(&report[ARGUMENTS_START..ARGUMENTS_START + expected_data_size])
+        Ok(&report[ARGUMENTS_START..ARGUMENTS_START + usize::from(spec.data_size)])
     }
 
     pub(crate) fn parse_battery_level(
         feature_report: &[u8],
         transaction_id: u8,
     ) -> Result<u8, ProtocolError> {
-        let raw = Self::parse(feature_report, transaction_id, 0x07, 0x80, 2)?;
+        let raw = Self::parse(feature_report, transaction_id, BATTERY_LEVEL)?;
         Ok(raw[1])
     }
 
@@ -214,7 +246,38 @@ impl RazerReportParser {
         feature_report: &[u8],
         transaction_id: u8,
     ) -> Result<bool, ProtocolError> {
-        let raw = Self::parse(feature_report, transaction_id, 0x07, 0x84, 2)?;
+        let raw = Self::parse(feature_report, transaction_id, CHARGING_STATUS)?;
         Ok(raw[1] != 0)
+    }
+
+    pub(crate) fn parse_firmware_info(
+        feature_report: &[u8],
+        transaction_id: u8,
+    ) -> Result<(u8, u8), ProtocolError> {
+        let raw = Self::parse(feature_report, transaction_id, FIRMWARE_INFO)?;
+        Ok((raw[0], raw[1]))
+    }
+
+    pub(crate) fn parse_get_dpi(
+        feature_report: &[u8],
+        transaction_id: u8,
+    ) -> Result<(u16, u16), ProtocolError> {
+        let raw = Self::parse(feature_report, transaction_id, GET_DPI)?;
+        let x = u16::from_be_bytes([raw[1], raw[2]]);
+        let y = u16::from_be_bytes([raw[3], raw[4]]);
+        Ok((x, y))
+    }
+
+    pub(crate) fn parse_set_dpi(
+        feature_report: &[u8],
+        transaction_id: u8,
+    ) -> Result<(u16, u16), ProtocolError> {
+        let raw = Self::parse(feature_report, transaction_id, SET_DPI)?;
+
+        // The Basilisk V3 Pro echoes the applied X and Y DPI values in the
+        // SET_DPI response using the same layout as the request arguments.
+        let x = u16::from_be_bytes([raw[1], raw[2]]);
+        let y = u16::from_be_bytes([raw[3], raw[4]]);
+        Ok((x, y))
     }
 }

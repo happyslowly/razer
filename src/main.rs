@@ -1,16 +1,19 @@
 mod battery;
+mod cli;
 mod device;
+mod dpi;
+mod firmware;
 mod protocol;
 mod transport;
 
+use crate::cli::{Cli, Commands};
+use clap::Parser;
 use hidapi::HidApi;
 
-use crate::battery::BatteryInfo;
-
-const VENDOR_ID: u16 = 0x1532;
-
 fn main() -> std::process::ExitCode {
-    match run() {
+    let cli = Cli::parse();
+
+    match run(cli.command) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err}");
@@ -19,37 +22,31 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
     let api = HidApi::new()?;
-    let razer_devices = device::get_devices_by_vendor(&api, VENDOR_ID);
+    let razer_devices = device::get_devices(&api)?;
     if razer_devices.is_empty() {
-        eprintln!("No Razer Mouse found");
         return Err("no supported Razer mouse found".into());
     }
-    for info in razer_devices {
-        #[cfg(debug_assertions)]
-        dbg!(&info);
 
-        let device = info.open(&api)?;
-
-        #[cfg(debug_assertions)]
-        dbg!("successfully open device");
-
-        let battery_info = BatteryInfo::query(&device)?;
-
-        if let Some(product_name) = info.product_name() {
-            println!("{product_name}");
+    for device in razer_devices {
+        if let Some(name) = &device.product_name {
+            println!("{name}")
         }
 
-        println!(
-            "Battery: {:.0}% {}",
-            battery_info.percentage(),
-            if battery_info.charging {
-                "(charging)"
-            } else {
-                ""
+        match command {
+            Commands::Battery => println!("{}", device.battery_info()?),
+            Commands::Firmware => println!("{}", device.firmware_info()?),
+            Commands::Dpi { x, y } => {
+                let dpi = match (x, y) {
+                    (Some(x), Some(y)) => device.set_dpi(x, y),
+                    (Some(x), None) => device.set_dpi(x, x),
+                    (None, Some(_)) => unreachable!("Y cannot be provided without X"),
+                    (None, None) => device.get_dpi(),
+                }?;
+                println!("{dpi}")
             }
-        )
+        }
     }
     Ok(())
 }

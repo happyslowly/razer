@@ -1,12 +1,17 @@
-use hidapi::{DeviceInfo, HidApi, HidDevice, HidError};
-use std::ffi::CString;
+use hidapi::{HidApi, HidDevice, HidError};
+
+use crate::battery::{self, BatteryInfo};
+use crate::dpi::{self, Dpi};
+use crate::firmware::{self, FirmwareInfo};
+
+const VENDOR_ID: u16 = 0x1532;
 
 #[derive(Debug)]
-pub(crate) struct DeviceProfile {
-    pub(crate) product_id: u16,
-    pub(crate) interface_number: i32,
-    pub(crate) usage_page: u16,
-    pub(crate) usage: u16,
+struct DeviceProfile {
+    product_id: u16,
+    interface_number: i32,
+    usage_page: u16,
+    usage: u16,
 }
 
 const DEVICE_PROFILES: &[DeviceProfile] = &[DeviceProfile {
@@ -16,26 +21,26 @@ const DEVICE_PROFILES: &[DeviceProfile] = &[DeviceProfile {
     usage: 0x02,
 }];
 
-#[derive(Debug)]
-pub(crate) struct RazerDeviceInfo {
-    path: CString,
-    product_name: Option<String>,
+pub(crate) struct RazerDevice {
+    device: HidDevice,
+    pub(crate) product_name: Option<String>,
 }
 
-impl RazerDeviceInfo {
-    fn from(info: &DeviceInfo) -> Self {
-        RazerDeviceInfo {
-            path: info.path().to_owned(),
-            product_name: info.product_string().map(str::to_string),
-        }
+impl RazerDevice {
+    pub(crate) fn battery_info(&self) -> Result<BatteryInfo, Box<dyn std::error::Error>> {
+        battery::get(&self.device)
     }
 
-    pub(crate) fn open(&self, api: &HidApi) -> Result<HidDevice, HidError> {
-        api.open_path(self.path.as_c_str())
+    pub(crate) fn firmware_info(&self) -> Result<FirmwareInfo, Box<dyn std::error::Error>> {
+        firmware::get(&self.device)
     }
 
-    pub(crate) fn product_name(&self) -> Option<&str> {
-        self.product_name.as_deref()
+    pub(crate) fn get_dpi(&self) -> Result<Dpi, Box<dyn std::error::Error>> {
+        dpi::get(&self.device)
+    }
+
+    pub(crate) fn set_dpi(&self, x: u16, y: u16) -> Result<Dpi, Box<dyn std::error::Error>> {
+        dpi::set(&self.device, x, y)
     }
 }
 
@@ -45,23 +50,29 @@ fn profile_by_product_id(product_id: u16) -> Option<&'static DeviceProfile> {
         .find(|profile| profile.product_id == product_id)
 }
 
-pub(crate) fn get_devices_by_vendor(api: &HidApi, vendor_id: u16) -> Vec<RazerDeviceInfo> {
+pub(crate) fn get_devices(api: &HidApi) -> Result<Vec<RazerDevice>, HidError> {
     let mut devices = Vec::new();
-    for device in api.device_list() {
-        if device.vendor_id() != vendor_id {
+    for info in api.device_list() {
+        if info.vendor_id() != VENDOR_ID {
             continue;
         }
 
-        let Some(profile) = profile_by_product_id(device.product_id()) else {
+        let Some(profile) = profile_by_product_id(info.product_id()) else {
             continue;
         };
 
-        if device.interface_number() == profile.interface_number
-            && device.usage_page() == profile.usage_page
-            && device.usage() == profile.usage
+        if info.interface_number() != profile.interface_number
+            || info.usage_page() != profile.usage_page
+            || info.usage() != profile.usage
         {
-            devices.push(RazerDeviceInfo::from(device))
+            continue;
         }
+
+        let device = api.open_path(info.path())?;
+        devices.push(RazerDevice {
+            device,
+            product_name: info.product_string().map(str::to_string),
+        });
     }
-    devices
+    Ok(devices)
 }
