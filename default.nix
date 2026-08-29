@@ -17,7 +17,7 @@ pkgs.rustPlatform.buildRustPackage {
   ];
 
   meta = {
-    description = "Query battery status from supported Razer devices";
+    description = "Query and configure supported Razer devices";
     mainProgram = "razer";
     platforms = pkgs.lib.platforms.linux;
   };

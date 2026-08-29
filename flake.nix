@@ -1,5 +1,5 @@
 {
-  description = "Query battery status from supported Razer devices";
+  description = "Query and configure supported Razer devices";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/26.05";
 
